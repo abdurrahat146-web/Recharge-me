@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Recharge Please!</title>
+<style>
+  :root{
+    --bg:#0e1420; --panel:#161f30; --grid:#1f2b40;
+    --accent:#ffb347; --good:#5fe38a; --text:#eef2f8;
+  }
+  *{box-sizing:border-box;}
+  html,body{
+    margin:0;padding:0;height:100%;
+    background:radial-gradient(circle at 50% 0%, #182236 0%, var(--bg) 60%);
+    font-family:'Courier New',monospace; color:var(--text);
+    overflow:hidden; touch-action:none; -webkit-user-select:none; user-select:none;
+  }
+  #app{display:flex;flex-direction:column;align-items:center;justify-content:flex-start;height:100%;width:100%;padding:8px 0;}
+  h1{font-size:1.2rem;letter-spacing:2px;margin:2px 0;color:var(--accent);text-shadow:0 0 12px rgba(255,179,71,.5);}
+  #status{font-size:.75rem;opacity:.7;margin-bottom:4px;height:1rem;text-align:center;padding:0 12px;}
+  #boardWrap{position:relative;background:var(--panel);border-radius:14px;box-shadow:0 0 0 1px #26324a, 0 12px 30px rgba(0,0,0,.5);}
+  canvas{display:block;touch-action:none;}
+  #hud{display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;justify-content:center;padding:0 10px;}
+  button{background:var(--grid);color:var(--text);border:1px solid #34435f;padding:7px 12px;border-radius:8px;font-family:inherit;font-size:.8rem;cursor:pointer;}
+  button:active{background:#26324a;}
+  #level{font-size:.8rem;opacity:.85;min-width:80px;text-align:center;}
+  #winFlash{position:absolute;inset:0;background:rgba(95,227,138,0.15);border-radius:14px;pointer-events:none;opacity:0;transition:opacity .3s;}
+  #levelSelect{max-width:90vw;max-height:70vh;overflow:auto;display:none;flex-wrap:wrap;gap:6px;padding:10px;background:var(--panel);border-radius:12px;}
+  #levelSelect.open{display:flex;}
+  #levelSelect button{width:42px;height:42px;padding:0;font-size:.75rem;}
+  #overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:10;}
+  #overlay.open{display:flex;}
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>⚡ RECHARGE PLEASE!</h1>
+  <div id="status">Drag each plug to its matching socket</div>
+  <div id="boardWrap">
+    <canvas id="board"></canvas>
+    <div id="winFlash"></div>
+  </div>
+  <div id="hud">
+    <button id="prevBtn">◀</button>
+    <div id="level">Level 1</div>
+    <button id="nextBtn">▶</button>
+    <button id="resetBtn">Reset</button>
+    <button id="levelsBtn">Levels</button>
+  </div>
+</div>
+
+<div id="overlay">
+  <div id="levelSelect"></div>
+</div>
+
+<script>
+(function(){
+  const canvas = document.getElementById('board');
+  const ctx = canvas.getContext('2d');
+  const statusEl = document.getElementById('status');
+  const levelEl = document.getElementById('level');
+  const winFlash = document.getElementById('winFlash');
+  const overlay = document.getElementById('overlay');
+  const levelSelect = document.getElementById('levelSelect');
+
+  const COLORS = ['#ff5f6d','#5fc9ff','#ffe15f','#7effa0','#c98bff','#ff9d5c','#5fffe0','#ff6fc9'];
+  const TOTAL_LEVELS = 100;
+  const STORAGE_KEY = 'rechargeplease_progress';
+
+  // ---- Seeded RNG ----
+  function mulberry32(seed){
+    return function(){
+      seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // ---- Procedural level generator ----
+  // Strategy: build a grid, generate non-overlapping simple paths (L-shapes / straight lines)
+  // for N pairs, place plug at one end, socket at other. Guarantees solvability since a
+  // valid path is what we started from (though the player need not use the exact same path,
+  // any valid orthogonal non-crossing path to the correct color socket wins).
+  function generateLevel(levelNum){
+    const rng = mulberry32(levelNum * 7919 + 13);
+    const difficulty = Math.min(1, levelNum / TOTAL_LEVELS);
+    const cols = 5 + Math.floor(difficulty * 4) + (levelNum % 3 === 0 ? 1 : 0); // 5..10
+    const rows = 5 + Math.floor(difficulty * 4) + (levelNum % 4 === 0 ? 1 : 0);
+    const pairCount = Math.min(2 + Math.floor(levelNum / 12), COLORS.length);
+
+    const occupied = new Set();
+    const key = (x,y)=>x+','+y;
+
+    function randCell(){
+      return { x: Math.floor(rng()*cols), y: Math.floor(rng()*rows) };
+    }
+
+    function tryBuildPath(){
+      // random walk from a free start cell, length depends on difficulty
+      let start = randCell();
+      if(occupied.has(key(start.x,start.y))) return null;
+      const targetLen = 3 + Math.floor(rng()* (3 + Math.floor(difficulty*6)));
+      const path = [start];
+      const visited = new Set([key(start.x,start.y)]);
+      let cur = start;
+      const dirs = [{dx:1,dy:0},{dx:-1,dy:0},{dx:0,dy:1},{dx:0,dy:-1}];
+
+      for(let step=0; step<targetLen; step++){
+        const shuffled = dirs.slice().sort(()=>rng()-0.5);
+        let moved = false;
+        for(const d of shuffled){
+          const nx = cur.x+d.dx, ny = cur.y+d.dy;
+          if(nx<0||ny<0||nx>=cols||ny>=rows) continue;
+          const k = key(nx,ny);
+          if(visited.has(k) || occupied.has(k)) continue;
+          cur = {x:nx,y:ny};
+          path.push(cur);
+          visited.add(k);
+          moved = true;
+          break;
+        }
+        if(!moved) break;
+      }
+      if(path.length < 2) return null;
+      return path;
+    }
+
+    const plugs = [];
+    const sockets = [];
+    let attempts = 0;
+    while(plugs.length < pairCount && attempts < 400){
+      attempts++;
+      const path = tryBuildPath();
+      if(!path) continue;
+      // mark occupied
+      path.forEach(p=>occupied.add(key(p.x,p.y)));
+      const c = plugs.length % COLORS.length;
+      const a = path[0], b = path[path.length-1];
+      plugs.push({x:a.x, y:a.y, c});
+      sockets.push({x:b.x, y:b.y, c});
+    }
+
+    // fallback: if generator struggled, ensure at least 2 pairs on a small grid
+    if(plugs.length < 2){
+      return { cols:5, rows:5,
+        plugs:[{x:0,y:0,c:0},{x:4,y:4,c:1}],
+        sockets:[{x:4,y:0,c:1},{x:0,y:4,c:0}] };
+    }
+
+    return { cols, rows, plugs, sockets };
+  }
+
+  let levelIndex = 0; // 0-based
+  let cols, rows, cell;
+  let plugs = [];
+  let sockets = [];
+  let dragging = null;
+  let dragPath = [];
+
+  function loadProgress(){
+    try{
+      const v = localStorage.getItem(STORAGE_KEY);
+      return v ? JSON.parse(v) : {unlocked:1, current:0};
+    }catch(e){ return {unlocked:1, current:0}; }
+  }
+  function saveProgress(p){
+    try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(p)); }catch(e){}
+  }
+  let progress = loadProgress();
+
+  function sizeCanvas(){
+    const maxW = Math.min(window.innerWidth - 20, 480);
+    const maxH = Math.min(window.innerHeight - 190, 480);
+    const size = Math.min(maxW, maxH);
+    cell = Math.floor(size / Math.max(cols, rows));
+    canvas.width = cell * cols;
+    canvas.height = cell * rows;
+  }
+
+  function loadLevel(i){
+    levelIndex = ((i % TOTAL_LEVELS) + TOTAL_LEVELS) % TOTAL_LEVELS;
+    const lvl = generateLevel(levelIndex + 1);
+    cols = lvl.cols; rows = lvl.rows;
+    plugs = lvl.plugs.map(p => ({x:p.x, y:p.y, c:p.c, path:[{x:p.x,y:p.y}], done:false}));
+    sockets = lvl.sockets.map(s => ({x:s.x, y:s.y, c:s.c, filled:false}));
+    dragging = null; dragPath = [];
+    sizeCanvas();
+    levelEl.textContent = 'Level ' + (levelIndex+1) + '/' + TOTAL_LEVELS;
+    statusEl.textContent = 'Drag each plug to its matching socket';
+    winFlash.style.opacity = 0;
+    progress.current = levelIndex;
+    saveProgress(progress);
+    draw();
+  }
+
+  function cellCenter(cx, cy){ return { x: cx*cell + cell/2, y: cy*cell + cell/2 }; }
+
+  function draw(){
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.strokeStyle = '#22304a'; ctx.lineWidth = 1;
+    for(let x=0;x<=cols;x++){ ctx.beginPath(); ctx.moveTo(x*cell,0); ctx.lineTo(x*cell,rows*cell); ctx.stroke(); }
+    for(let y=0;y<=rows;y++){ ctx.beginPath(); ctx.moveTo(0,y*cell); ctx.lineTo(cols*cell,y*cell); ctx.stroke(); }
+
+    sockets.forEach(s=>{
+      const p = cellCenter(s.x, s.y);
+      ctx.save();
+      ctx.strokeStyle = COLORS[s.c]; ctx.lineWidth = 3;
+      ctx.globalAlpha = s.filled ? 1 : 0.55;
+      ctx.beginPath(); ctx.arc(p.x, p.y, cell*0.32, 0, Math.PI*2); ctx.stroke();
+      if(s.filled){ ctx.fillStyle = COLORS[s.c]; ctx.globalAlpha = 0.25; ctx.fill(); }
+      ctx.beginPath();
+      ctx.moveTo(p.x-cell*0.1, p.y-cell*0.15); ctx.lineTo(p.x-cell*0.1, p.y+cell*0.05);
+      ctx.moveTo(p.x+cell*0.1, p.y-cell*0.15); ctx.lineTo(p.x+cell*0.1, p.y+cell*0.05);
+      ctx.stroke();
+      ctx.restore();
+    });
+
+    plugs.forEach(pl=>{
+      drawPath(pl.path, COLORS[pl.c], pl.done);
+      const start = cellCenter(pl.x, pl.y);
+      drawPlugHead(start, COLORS[pl.c]);
+    });
+
+    if(dragging){ drawPath(dragPath, COLORS[dragging.c], false, true); }
+  }
+
+  function drawPath(path, color, filled, isDrag){
+    if(path.length < 1) return;
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = Math.max(6, cell*0.22);
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.globalAlpha = filled ? 1 : (isDrag ? 0.9 : 0.85);
+    ctx.beginPath();
+    const p0 = cellCenter(path[0].x, path[0].y);
+    ctx.moveTo(p0.x, p0.y);
+    for(let i=1;i<path.length;i++){ const p = cellCenter(path[i].x, path[i].y); ctx.lineTo(p.x, p.y); }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawPlugHead(p, color){
+    ctx.save();
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(p.x, p.y, cell*0.2, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#0e1420'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.restore();
+  }
+
+  function cellFromPointer(evt){
+    const rect = canvas.getBoundingClientRect();
+    const cx = evt.clientX - rect.left, cy = evt.clientY - rect.top;
+    return { gx: Math.floor(cx / cell), gy: Math.floor(cy / cell) };
+  }
+
+  function pathBlocked(nx, ny, ignoreIdx){
+    if(nx<0||ny<0||nx>=cols||ny>=rows) return true;
+    for(let i=0;i<plugs.length;i++){
+      if(i===ignoreIdx) continue;
+      if(plugs[i].path.some(pt=>pt.x===nx && pt.y===ny)) return true;
+    }
+    return false;
+  }
+
+  function startDrag(evt){
+    const {gx, gy} = cellFromPointer(evt);
+    const idx = plugs.findIndex(p=>!p.done && p.path.length===1 && p.path[0].x===gx && p.path[0].y===gy);
+    if(idx>=0){
+      dragging = plugs[idx]; dragging._idx = idx;
+      dragPath = [{x:dragging.x,y:dragging.y}];
+    }
+  }
+
+  function extendDrag(evt){
+    if(!dragging) return;
+    const {gx, gy} = cellFromPointer(evt);
+    const last = dragPath[dragPath.length-1];
+    if(gx===last.x && gy===last.y) return;
+    const dx = Math.abs(gx-last.x), dy = Math.abs(gy-last.y);
+    if(!((dx===1&&dy===0)||(dx===0&&dy===1))) return;
+    if(dragPath.length>1){
+      const prev = dragPath[dragPath.length-2];
+      if(prev.x===gx && prev.y===gy){ dragPath.pop(); draw(); redrawDrag(); return; }
+    }
+    if(pathBlocked(gx, gy, dragging._idx)) return;
+    if(dragPath.some(pt=>pt.x===gx&&pt.y===gy)) return;
+    dragPath.push({x:gx,y:gy});
+    draw(); redrawDrag();
+  }
+
+  function redrawDrag(){
+    drawPath(dragPath, COLORS[dragging.c], false, true);
+    const start = cellCenter(dragging.x, dragging.y);
+    drawPlugHead(start, COLORS[dragging.c]);
+  }
+
+  function endDrag(){
+    if(!dragging) return;
+    const last = dragPath[dragPath.length-1];
+    const sock = sockets.find(s=>s.x===last.x && s.y===last.y && !s.filled);
+    if(sock && sock.c === dragging.c && dragPath.length>1){
+      dragging.path = dragPath.slice();
+      dragging.done = true;
+      sock.filled = true;
+      checkWin();
+    }
+    dragging = null; dragPath = [];
+    draw();
+  }
+
+  function checkWin(){
+    if(plugs.every(p=>p.done)){
+      statusEl.textContent = '⚡ Charged! Tap ▶ for next level';
+      winFlash.style.opacity = 1;
+      if(levelIndex+1 >= progress.unlocked && progress.unlocked < TOTAL_LEVELS){
+        progress.unlocked = Math.min(TOTAL_LEVELS, levelIndex+2);
+        saveProgress(progress);
+      }
+    }
+  }
+
+  canvas.addEventListener('pointerdown', e=>{ canvas.setPointerCapture(e.pointerId); startDrag(e); });
+  canvas.addEventListener('pointermove', e=>{ if(dragging) extendDrag(e); });
+  canvas.addEventListener('pointerup', endDrag);
+  canvas.addEventListener('pointercancel', endDrag);
+
+  document.getElementById('resetBtn').addEventListener('click', ()=>loadLevel(levelIndex));
+  document.getElementById('nextBtn').addEventListener('click', ()=>loadLevel(levelIndex+1));
+  document.getElementById('prevBtn').addEventListener('click', ()=>loadLevel(levelIndex-1));
+
+  document.getElementById('levelsBtn').addEventListener('click', ()=>{
+    levelSelect.innerHTML = '';
+    for(let i=0;i<TOTAL_LEVELS;i++){
+      const b = document.createElement('button');
+      b.textContent = i+1;
+      const locked = i >= progress.unlocked;
+      b.disabled = locked;
+      b.style.opacity = locked ? 0.35 : 1;
+      b.addEventListener('click', ()=>{ loadLevel(i); overlay.classList.remove('open'); });
+      levelSelect.appendChild(b);
+    }
+    overlay.classList.add('open');
+  });
+  overlay.addEventListener('click', (e)=>{ if(e.target===overlay) overlay.classList.remove('open'); });
+
+  window.addEventListener('resize', ()=>{ sizeCanvas(); draw(); });
+
+  loadLevel(progress.current || 0);
+})();
+</script>
+</body>
+</html>
