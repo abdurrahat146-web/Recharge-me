@@ -1,0 +1,6 @@
+{
+  "appId": "com.rahu.rechargeplease",
+  "appName": "Recharge Please",
+  "webDir": "www",
+  "bundledWebRuntime": false
+}
